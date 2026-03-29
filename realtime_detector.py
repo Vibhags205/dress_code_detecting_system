@@ -2,23 +2,31 @@
 import numpy as np
 import csv
 import os
-import threading
+import time
+import winsound
 from datetime import datetime
 import pyttsx3
 from tensorflow.keras.models import load_model
 
 # ── VOICE FEEDBACK ────────────────────────────────────────────────────────────
-_tts_engine = pyttsx3.init()
-_tts_engine.setProperty("rate", 160)   # words per minute
-_tts_lock = threading.Lock()
-
 def speak(text: str):
-    """Speak *text* in a daemon thread so the camera loop is never blocked."""
-    def _run():
-        with _tts_lock:
-            _tts_engine.say(text)
-            _tts_engine.runAndWait()
-    threading.Thread(target=_run, daemon=True).start()
+    """Speak immediately for this detection; fallback to a beep on failure."""
+    try:
+        engine = pyttsx3.init()
+        engine.setProperty("rate", 160)
+        engine.setProperty("volume", 1.0)
+        engine.say(text)
+        engine.runAndWait()
+        engine.stop()
+    except Exception as exc:
+        print(f"Audio error: {exc}")
+        winsound.Beep(1500, 500)
+
+def announce_result(result_label: str):
+    if result_label == "NON-COMPLIANT":
+        speak("Please follow proper dress code")
+    else:
+        speak("Thank you, you may enter")
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── REPORT SETUP ──────────────────────────────────────────────────────────────
@@ -96,10 +104,17 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 print("--- Dress Code Detector Loaded ---")
 print("Controls:")
-print("  SPACE -> capture and classify")
+print("  Auto-capture once after person stands for 5 seconds")
+print("  SPACE -> capture immediately (optional override)")
 print("  L     -> flip labels (if results seem reversed)")
-print("  R     -> return to live view")
+print("  R     -> return to live view now")
 print("  Q     -> quit")
+
+RESULT_HOLD_SEC = 2.0
+PERSON_STAND_SEC = 5.0
+FACE_CASCADE = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
 
 STATE_LIVE   = "live"
 STATE_RESULT = "result"
@@ -108,6 +123,9 @@ result_frame      = None
 result_frame_orig = None
 score             = 0.0
 labels_flipped    = False
+result_shown_until = 0.0
+captured_for_current_person = False
+person_seen_since = None
 
 def classify_frame(bgr_frame):
     # Convert BGR (OpenCV) to RGB (Model expectation)
@@ -127,12 +145,28 @@ def classify_frame(bgr_frame):
     prediction = model.predict(inp, verbose=0)
     return float(prediction[0][0])
 
-def draw_live_overlay(frame):
+def person_seen_in_frame(bgr_frame):
+    gray = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2GRAY)
+    faces = FACE_CASCADE.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(60, 60),
+    )
+    return len(faces) > 0
+
+def draw_live_overlay(frame, person_seen, captured_for_person, standing_seconds_left):
     h, w = frame.shape[:2]
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, h - 44), (w, h), (30, 30, 30), -1)
     cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
-    cv2.putText(frame, "SPACE=capture  L=flip labels  Q=quit",
+    if person_seen and not captured_for_person:
+        status = f"Person seen -> capture in {standing_seconds_left:0.1f}s"
+    elif person_seen and captured_for_person:
+        status = "Person still in frame (already captured)"
+    else:
+        status = "No person seen"
+    cv2.putText(frame, f"{status}  SPACE=now  L=flip  Q=quit",
                 (10, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (220, 220, 220), 1)
     # Date & time in top-right corner
     dt_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
@@ -196,11 +230,22 @@ while True:
         ret, frame = cap.read()
         if not ret:
             break
-        
-        draw_live_overlay(frame)
+
+        person_seen = person_seen_in_frame(frame)
+        if not person_seen:
+            person_seen_since = None
+            captured_for_current_person = False
+        elif person_seen_since is None:
+            person_seen_since = time.monotonic()
+
+        standing_elapsed = 0.0 if person_seen_since is None else (time.monotonic() - person_seen_since)
+        standing_seconds_left = max(0.0, PERSON_STAND_SEC - standing_elapsed)
+
+        draw_live_overlay(frame, person_seen, captured_for_current_person, standing_seconds_left)
         cv2.imshow("Dress Code Detector", frame)
 
-        if key == ord(" "): # Spacebar to capture
+        auto_capture_due = person_seen and (standing_elapsed >= PERSON_STAND_SEC) and not captured_for_current_person
+        if key == ord(" ") or auto_capture_due: # Manual capture or one-time per person
             captured = frame.copy()
             result_frame_orig = captured.copy()
             print("Classifying...", end=" ", flush=True)
@@ -213,20 +258,26 @@ while True:
             log_detection(result_label, score, confidence)
             print(f"Logged: {result_label} (score={score:.4f}, conf={confidence:.0%})")
 
-            # Voice feedback
-            if is_nc:
-                speak("Please follow proper dress code")
-            else:
-                speak("Thank you, you may enter")
-
             result_frame = result_frame_orig.copy()
             draw_result_overlay(result_frame, score, flipped=labels_flipped)
+            # Show result first, then announce audio.
+            cv2.imshow("Dress Code Detector", result_frame)
+            cv2.waitKey(1)
+
+            # Voice feedback for every detection
+            announce_result(result_label)
+
             state = STATE_RESULT
+            result_shown_until = time.monotonic() + RESULT_HOLD_SEC
+            if person_seen:
+                captured_for_current_person = True
             print("Done.")
 
     elif state == STATE_RESULT:
         cv2.imshow("Dress Code Detector", result_frame)
         if key == ord("r") or key == ord("R"):
+            state = STATE_LIVE
+        elif time.monotonic() >= result_shown_until:
             state = STATE_LIVE
 
 cap.release()
