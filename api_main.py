@@ -18,8 +18,8 @@ MODEL_PATH = os.getenv("MODEL_PATH", "dress_code_detector (6).h5")
 THRESHOLD = float(os.getenv("DRESS_THRESHOLD", "0.5"))
 REPORTS_DIR = os.getenv("REPORTS_DIR", "reports")
 SUMMARY_FILE = os.path.join(REPORTS_DIR, "daily_summary.csv")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8300038302:AAFVG5i_ve2SwMgsjPuPGqHFYJXtAb4YYzs")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1003871574876")
 TELEGRAM_ALERT_COOLDOWN_SEC = int(os.getenv("TELEGRAM_ALERT_COOLDOWN_SEC", "30"))
 
 app = FastAPI(title="Dress Code Detector API", version="1.0.0")
@@ -104,15 +104,22 @@ def maybe_send_telegram_alert(image_bgr: np.ndarray, result: str, confidence: fl
 
     if result != "NON-COMPLIANT":
         return False
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    
+    if not TELEGRAM_BOT_TOKEN:
+        print("[Telegram] Skipped: BOT_TOKEN not set")
+        return False
+    if not TELEGRAM_CHAT_ID:
+        print("[Telegram] Skipped: CHAT_ID not set")
         return False
 
     now_ts = time.time()
     if (now_ts - last_telegram_alert_at) < TELEGRAM_ALERT_COOLDOWN_SEC:
+        print(f"[Telegram] Skipped: cooldown active ({now_ts - last_telegram_alert_at:.1f}s < {TELEGRAM_ALERT_COOLDOWN_SEC}s)")
         return False
 
     ok, buffer = cv2.imencode(".jpg", image_bgr)
     if not ok:
+        print("[Telegram] Skipped: image encode failed")
         return False
 
     message = (
@@ -127,14 +134,18 @@ def maybe_send_telegram_alert(image_bgr: np.ndarray, result: str, confidence: fl
     data = {"chat_id": TELEGRAM_CHAT_ID, "caption": message}
 
     try:
+        print(f"[Telegram] Sending alert to chat {TELEGRAM_CHAT_ID}...")
         resp = requests.post(url, data=data, files=files, timeout=12)
         if resp.ok:
+            print(f"[Telegram] Success: {resp.status_code}")
             last_telegram_alert_at = now_ts
             return True
-    except Exception:
+        else:
+            print(f"[Telegram] Failed: {resp.status_code} {resp.text}")
+            return False
+    except Exception as e:
+        print(f"[Telegram] Error: {e}")
         return False
-
-    return False
 
 
 def resolve_model_path() -> str:
@@ -277,20 +288,30 @@ def root() -> str:
         }
         .badge.bad { background: #fdeceb; color: var(--bad); }
         .small { color: var(--muted); font-size: 0.9rem; }
+        .status-bar { 
+            margin-top: 8px; 
+            padding: 8px; 
+            background: #f0f2ed; 
+            border-radius: 8px; 
+            font-size: 0.85rem; 
+        }
+        .status-bar.person-found { background: #d4edda; }
     </style>
 </head>
 <body>
     <div class="wrap">
         <h1>Dress Code Live Detector</h1>
-        <p>Open this link on any phone or PC, allow camera access, and run live checks.</p>
+        <p>Open this link on any phone or PC, allow camera access. Auto-captures every 5s when person detected.</p>
         <video id="video" playsinline autoplay muted></video>
         <canvas id="canvas" width="640" height="360" style="display:none"></canvas>
 
         <div class="row">
             <button id="startBtn">Start Live Detection</button>
             <button id="stopBtn" class="secondary">Stop</button>
-            <label>Interval (ms)</label>
-            <input id="intervalInput" type="number" min="500" step="100" value="1500" />
+        </div>
+
+        <div class="status-bar" id="statusBar">
+            <div class="small">Ready to start.</div>
         </div>
 
         <div class="result" id="resultBox">
@@ -298,16 +319,28 @@ def root() -> str:
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
     <script>
         const video = document.getElementById("video");
         const canvas = document.getElementById("canvas");
         const resultBox = document.getElementById("resultBox");
+        const statusBar = document.getElementById("statusBar");
         const startBtn = document.getElementById("startBtn");
         const stopBtn = document.getElementById("stopBtn");
-        const intervalInput = document.getElementById("intervalInput");
 
         let stream = null;
         let timer = null;
+        let model = null;
+        let isRunning = false;
+        let personDetectedSince = null;
+        let lastCaptureTime = null;
+
+        async function loadModel() {
+            statusBar.innerHTML = `<div class="small">Loading object detection model...</div>`;
+            model = await cocoSsd.load();
+            statusBar.innerHTML = `<div class="small">Model loaded. Ready to start.</div>`;
+        }
 
         async function startCamera() {
             if (stream) return;
@@ -322,6 +355,12 @@ def root() -> str:
             if (!stream) return;
             stream.getTracks().forEach(t => t.stop());
             stream = null;
+        }
+
+        async function detectPersonInFrame() {
+            if (!video.videoWidth || !video.videoHeight || !model) return false;
+            const predictions = await model.detect(video);
+            return predictions.some(p => p.class === "person" && p.score > 0.5);
         }
 
         async function detectOnce() {
@@ -345,36 +384,88 @@ def root() -> str:
             const isBad = data.result === "NON-COMPLIANT";
             resultBox.innerHTML = `
                 <div class="badge ${isBad ? "bad" : ""}">${data.result}</div>
-                <div style="margin-top:8px">Score: ${data.score}</div>
+                <div style="margin-top:8px">Score: ${data.score.toFixed(3)}</div>
                 <div>Confidence: ${Math.round(data.confidence * 100)}%</div>
                 <div class="small" style="margin-top:8px">Logged: ${data.logged_at.date} ${data.logged_at.time}</div>
-                <div class="small">Telegram Alert: ${data.telegram_alert_sent ? "Sent" : "No"}</div>
+                <div class="small">Telegram: ${data.telegram_alert_sent ? "✓ Sent" : "- Not sent"}</div>
             `;
+            
+            // Audio feedback
+            const speechText = isBad ? "Please follow proper dress code" : "Thank you, you may enter";
+            playAudio(speechText);
+            
+            lastCaptureTime = Date.now();
+        }
+
+        function playAudio(text) {
+            if ('speechSynthesis' in window) {
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.rate = 1.0;
+                utterance.pitch = 1.0;
+                utterance.volume = 1.0;
+                window.speechSynthesis.cancel();
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+
+        async function monitorAndAutoCapture() {
+            if (!isRunning) return;
+
+            try {
+                const personFound = await detectPersonInFrame();
+                const now = Date.now();
+
+                if (personFound) {
+                    if (!personDetectedSince) {
+                        personDetectedSince = now;
+                        statusBar.className = "status-bar person-found";
+                        statusBar.innerHTML = `<div class="small">Person detected, will auto-capture in 5s...</div>`;
+                    }
+                    const secondsSincePerson = (now - personDetectedSince) / 1000;
+                    statusBar.innerHTML = `<div class="small person-found">Person detected (${secondsSincePerson.toFixed(1)}s). Auto-capturing every 5s...</div>`;
+
+                    if (!lastCaptureTime || (now - lastCaptureTime) >= 5000) {
+                        await detectOnce();
+                    }
+                } else {
+                    personDetectedSince = null;
+                    statusBar.className = "status-bar";
+                    statusBar.innerHTML = `<div class="small">No person detected. Waiting...</div>`;
+                }
+            } catch (err) {
+                console.error("Monitor error:", err);
+            }
+
+            setTimeout(monitorAndAutoCapture, 500);
         }
 
         async function startLive() {
             try {
                 await startCamera();
-                if (timer) clearInterval(timer);
-                await detectOnce();
-                const every = Math.max(500, parseInt(intervalInput.value || "1500", 10));
-                timer = setInterval(detectOnce, every);
+                isRunning = true;
+                monitorAndAutoCapture();
             } catch (err) {
                 resultBox.innerHTML = `<div class="small">Camera error: ${err.message}</div>`;
+                isRunning = false;
             }
         }
 
         function stopLive() {
-            if (timer) {
-                clearInterval(timer);
-                timer = null;
-            }
+            isRunning = false;
+            personDetectedSince = null;
+            lastCaptureTime = null;
             stopCamera();
+            statusBar.className = "status-bar";
+            statusBar.innerHTML = `<div class="small">Stopped.</div>`;
             resultBox.innerHTML = `<div class="small">Stopped.</div>`;
         }
 
         startBtn.addEventListener("click", startLive);
         stopBtn.addEventListener("click", stopLive);
+
+        loadModel().catch(err => {
+            statusBar.innerHTML = `<div class="small" style="color:red;">Model load failed: ${err.message}</div>`;
+        });
     </script>
 </body>
 </html>
@@ -392,8 +483,19 @@ def status() -> Dict[str, Any]:
             "detect": "/detect",
             "reports_today": "/reports/today",
             "reports_summary": "/reports/summary",
+            "telegram_config": "/telegram-config",
             "docs": "/docs",
         },
+    }
+
+
+@app.get("/telegram-config")
+def telegram_config() -> Dict[str, Any]:
+    return {
+        "telegram_bot_token_set": bool(TELEGRAM_BOT_TOKEN),
+        "telegram_chat_id_set": bool(TELEGRAM_CHAT_ID),
+        "ready": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "note": "If ready=false, set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars and restart service",
     }
 
 
