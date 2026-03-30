@@ -68,6 +68,18 @@ def classify_image(bgr_image: np.ndarray) -> Dict[str, Any]:
     }
 
 
+@app.get("/")
+def root() -> Dict[str, Any]:
+    return {
+        "message": "Dress Code Detector API is running",
+        "endpoints": {
+            "health": "/health",
+            "detect": "/detect",
+            "docs": "/docs",
+        },
+    }
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     return {
