@@ -112,5 +112,28 @@ Voice Feedback  LED Control   Telegram Alert CSV Report
 - Hostel entry monitoring
 - Secure access systems
 
+##  Render Deployment (Shareable Camera Link)
+
+After deployment, users can open your Render URL directly on phone or PC and run live detection with their own camera.
+
+- Home page (camera UI): /
+- Health check: /health
+- API docs: /docs
+- Live detection API: /detect
+- Today logs: /reports/today
+- Summary logs: /reports/summary
+
+### Telegram setup on Render
+
+Set these environment variables in Render:
+
+- TELEGRAM_BOT_TOKEN
+- TELEGRAM_CHAT_ID
+- TELEGRAM_ALERT_COOLDOWN_SEC (optional, default 30)
+
+### Important note about CSV persistence on Render
+
+CSV files written inside the service filesystem may be lost on restart/redeploy unless you use a persistent disk or external database/storage.
+
 
 
