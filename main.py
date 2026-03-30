@@ -1,7 +1,4 @@
-import tensorflow as tf
-from tensorflow.keras.models import load_model
+from api_main import app
 
-# Load the model from the current directory
-model = load_model("dress_code_detector.h5")
-
-# Now you can use model.predict() just like in Colab
+# This file exists as a compatibility entrypoint for platforms
+# configured with: uvicorn main:app

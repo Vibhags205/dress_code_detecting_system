@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Any, Dict
 
 import cv2
@@ -17,14 +18,32 @@ img_h = 224
 img_w = 224
 
 
+def resolve_model_path() -> str:
+    # Prefer explicit MODEL_PATH, then common filenames, then any .h5 in project root.
+    candidates = [
+        Path(MODEL_PATH),
+        Path("dress_code_detector (6).h5"),
+        Path("dress_code_detector.h5"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    any_h5 = sorted(Path(".").glob("*.h5"))
+    if any_h5:
+        return str(any_h5[0])
+
+    raise RuntimeError(
+        "Model file not found. Set MODEL_PATH env var or include a .h5 model file in the app root."
+    )
+
+
 @app.on_event("startup")
 def load_detection_model() -> None:
     global model, img_h, img_w
 
-    if not os.path.isfile(MODEL_PATH):
-        raise RuntimeError(f"Model file not found: {MODEL_PATH}")
-
-    model = load_model(MODEL_PATH)
+    model_file = resolve_model_path()
+    model = load_model(model_file)
     _, img_h, img_w, _ = model.input_shape
 
 
@@ -54,7 +73,7 @@ def health() -> Dict[str, Any]:
     return {
         "status": "ok" if model is not None else "error",
         "model_loaded": model is not None,
-        "model_path": MODEL_PATH,
+        "model_path": resolve_model_path() if model is not None else MODEL_PATH,
         "input_size": [img_w, img_h],
     }
 
