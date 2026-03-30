@@ -2,7 +2,7 @@
 
 ##  Project Description
 
-The Dress Code Detector is a smart monitoring and access control system built using Raspberry Pi, OpenCV, and YOLOv8 pretrained model. It captures live video using a webcam, detects whether the person follows proper dress code, and performs automated actions such as:
+The Dress Code Detector is a smart monitoring and access control system built using Raspberry Pi, OpenCV, and a MobileNetV2-based classifier trained on 2.5k images in Google Colab. It captures live video using a webcam, detects whether the person follows proper dress code, and performs automated actions such as:
 
 - Voice feedback
 - Telegram alert notification
@@ -31,7 +31,7 @@ Boys:
 
 ### 1. Real-Time Detection
 - Captures live video using USB webcam
-- Uses YOLOv8 pretrained model for detection
+- Uses a MobileNetV2 model trained on 2.5k labeled images (Google Colab) for detection
 - Processes frames using OpenCV
   
 ### 2. Telegram Alert System
@@ -70,7 +70,7 @@ Please follow proper dress code
 
 - Python
 - OpenCV
-- YOLOv8 (Ultralytics)
+- MobileNetV2 (TensorFlow/Keras)
 - NumPy
 - Pandas
 - pyttsx3 (Text to Speech)
@@ -93,7 +93,7 @@ Camera Input
      ↓
 OpenCV Capture
      ↓
-YOLOv8 Detection
+MobileNetV2 Inference
      ↓
 Decision Logic
      ↓
