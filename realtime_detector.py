@@ -6,6 +6,7 @@ import time
 import winsound
 from datetime import datetime
 import pyttsx3
+import requests
 from tensorflow.keras.models import load_model
 
 # ── VOICE FEEDBACK ────────────────────────────────────────────────────────────
@@ -27,6 +28,38 @@ def announce_result(result_label: str):
         speak("Please follow proper dress code")
     else:
         speak("Thank you, you may enter")
+
+# ── TELEGRAM ALERTS ───────────────────────────────────────────────────────────
+BOT_TOKEN = "8300038302:AAFVG5i_ve2SwMgsjPuPGqHFYJXtAb4YYzs"
+CHAT_ID = "-1003871574876"
+
+def send_alert(image, confidence: float):
+    try:
+        now = datetime.now()
+        message = (
+            "Dress Code Violation Detected\n\n"
+            f"Date: {now.strftime('%Y-%m-%d')}\n"
+            f"Time: {now.strftime('%H:%M:%S')}\n"
+            "Location: College Entry Gate\n"
+            f"Accuracy: {confidence:.0%}"
+        )
+
+        ok, buffer = cv2.imencode(".jpg", image)
+        if not ok:
+            print("Telegram skipped: image encode failed")
+            return
+
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+        files = {"photo": ("alert.jpg", buffer.tobytes(), "image/jpeg")}
+        data = {"chat_id": CHAT_ID, "caption": message}
+        resp = requests.post(url, data=data, files=files, timeout=12)
+
+        if resp.ok:
+            print("Telegram alert sent")
+        else:
+            print(f"Telegram send failed: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print("Telegram error:", e)
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── REPORT SETUP ──────────────────────────────────────────────────────────────
@@ -266,6 +299,9 @@ while True:
 
             # Voice feedback for every detection
             announce_result(result_label)
+
+            if result_label == "NON-COMPLIANT":
+                send_alert(captured, confidence)
 
             state = STATE_RESULT
             result_shown_until = time.monotonic() + RESULT_HOLD_SEC
