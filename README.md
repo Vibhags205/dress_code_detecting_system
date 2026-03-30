@@ -131,6 +131,24 @@ Set these environment variables in Render:
 - TELEGRAM_CHAT_ID
 - TELEGRAM_ALERT_COOLDOWN_SEC (optional, default 30)
 
+### Camera tuning for phone and laptop
+
+This project now supports separate tuning for phone and laptop camera feeds.
+
+- DRESS_THRESHOLD: global default threshold (fallback)
+- DRESS_THRESHOLD_PHONE: threshold used when source is phone camera
+- DRESS_THRESHOLD_LAPTOP: threshold used when source is laptop camera
+
+For local OpenCV app (`realtime_detector.py`):
+
+- CAMERA_PROFILE=laptop (default) or CAMERA_PROFILE=phone
+
+Suggested starting values:
+
+- DRESS_THRESHOLD=0.50
+- DRESS_THRESHOLD_PHONE=0.58
+- DRESS_THRESHOLD_LAPTOP=0.52
+
 ### Important note about CSV persistence on Render
 
 CSV files written inside the service filesystem may be lost on restart/redeploy unless you use a persistent disk or external database/storage.

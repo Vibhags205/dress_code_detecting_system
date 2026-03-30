@@ -9,13 +9,15 @@ from typing import Any, Dict, List
 import cv2
 import numpy as np
 import requests
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from tensorflow.keras.models import load_model
 
 
 MODEL_PATH = os.getenv("MODEL_PATH", "dress_code_detector (6).h5")
 THRESHOLD = float(os.getenv("DRESS_THRESHOLD", "0.5"))
+PHONE_THRESHOLD = float(os.getenv("DRESS_THRESHOLD_PHONE", str(THRESHOLD)))
+LAPTOP_THRESHOLD = float(os.getenv("DRESS_THRESHOLD_LAPTOP", str(THRESHOLD)))
 REPORTS_DIR = os.getenv("REPORTS_DIR", "reports")
 SUMMARY_FILE = os.path.join(REPORTS_DIR, "daily_summary.csv")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8300038302:AAFVG5i_ve2SwMgsjPuPGqHFYJXtAb4YYzs")
@@ -178,25 +180,46 @@ def load_detection_model() -> None:
     _, img_h, img_w, _ = model.input_shape
 
 
-def classify_image(bgr_image: np.ndarray) -> Dict[str, Any]:
+def _resolve_threshold(device_type: str) -> float:
+    device = (device_type or "").strip().lower()
+    if device == "phone":
+        return PHONE_THRESHOLD
+    if device == "laptop":
+        return LAPTOP_THRESHOLD
+    return THRESHOLD
+
+
+def classify_image(bgr_image: np.ndarray, device_type: str = "unknown") -> Dict[str, Any]:
     rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
-    sized = cv2.resize(rgb, (img_w, img_h))
-    inp = sized.astype(np.float32) / 255.0
-    inp = np.expand_dims(inp, axis=0)
+
+    # Use three views to stabilize predictions under phone/laptop camera noise.
+    full = cv2.resize(rgb, (img_w, img_h))
+    h, w = rgb.shape[:2]
+    crop_h = max(1, int(h * 0.9))
+    crop_w = max(1, int(w * 0.9))
+    y0 = (h - crop_h) // 2
+    x0 = (w - crop_w) // 2
+    center_crop = cv2.resize(rgb[y0:y0 + crop_h, x0:x0 + crop_w], (img_w, img_h))
+    flipped = cv2.flip(full, 1)
+
+    inp = np.stack([full, center_crop, flipped], axis=0).astype(np.float32) / 255.0
 
     with inference_lock:
         prediction = model.predict(inp, verbose=0)
-    score = float(prediction[0][0])
-    is_non_compliant = score > THRESHOLD
+
+    score = float(np.mean(prediction[:, 0]))
+    threshold = _resolve_threshold(device_type)
+    is_non_compliant = score > threshold
     result = "NON-COMPLIANT" if is_non_compliant else "COMPLIANT"
-    confidence = abs(score - THRESHOLD) * (1.0 / max(THRESHOLD, 1.0 - THRESHOLD))
+    confidence = abs(score - threshold) * (1.0 / max(threshold, 1.0 - threshold))
     confidence = float(max(0.0, min(confidence, 1.0)))
 
     return {
         "result": result,
         "score": round(score, 6),
         "confidence": round(confidence, 6),
-        "threshold": THRESHOLD,
+        "threshold": threshold,
+        "device_type": device_type,
     }
 
 
@@ -335,6 +358,14 @@ def root() -> str:
         let isRunning = false;
         let personDetectedSince = null;
         let lastCaptureTime = null;
+        let deviceType = "laptop";
+
+        function detectDeviceType() {
+            const ua = navigator.userAgent || "";
+            const mobileByUA = /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+            const touchCapable = navigator.maxTouchPoints && navigator.maxTouchPoints > 1;
+            return (mobileByUA || touchCapable) ? "phone" : "laptop";
+        }
 
         async function loadModel() {
             statusBar.innerHTML = `<div class="small">Loading object detection model...</div>`;
@@ -344,11 +375,49 @@ def root() -> str:
 
         async function startCamera() {
             if (stream) return;
-            stream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "environment" },
-                audio: false,
-            });
+
+            deviceType = detectDeviceType();
+            const baseConstraints = deviceType === "phone"
+                ? {
+                    facingMode: { ideal: "environment" },
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
+                    frameRate: { ideal: 24, max: 30 },
+                }
+                : {
+                    facingMode: { ideal: "user" },
+                    width: { ideal: 960 },
+                    height: { ideal: 540 },
+                    frameRate: { ideal: 20, max: 30 },
+                };
+
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: baseConstraints,
+                    audio: false,
+                });
+            } catch {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: false,
+                });
+            }
+
+            const [track] = stream.getVideoTracks();
+            if (track) {
+                const advanced = deviceType === "phone"
+                    ? [{ focusMode: "continuous" }, { exposureMode: "continuous" }, { whiteBalanceMode: "continuous" }]
+                    : [{ exposureMode: "continuous" }, { whiteBalanceMode: "continuous" }];
+                try {
+                    await track.applyConstraints({ advanced });
+                } catch {
+                    // Not all browsers/devices support advanced camera controls.
+                }
+            }
+
             video.srcObject = stream;
+            statusBar.className = "status-bar";
+            statusBar.innerHTML = `<div class="small">Camera started (${deviceType}).</div>`;
         }
 
         function stopCamera() {
@@ -363,6 +432,15 @@ def root() -> str:
             return predictions.some(p => p.class === "person" && p.score > 0.5);
         }
 
+        async function getBestPersonPrediction() {
+            if (!video.videoWidth || !video.videoHeight || !model) return null;
+            const predictions = await model.detect(video);
+            const people = predictions.filter(p => p.class === "person" && p.score > 0.5);
+            if (!people.length) return null;
+            people.sort((a, b) => b.score - a.score);
+            return people[0];
+        }
+
         async function detectOnce() {
             if (!video.videoWidth || !video.videoHeight) return;
             const ctx = canvas.getContext("2d");
@@ -370,9 +448,32 @@ def root() -> str:
             canvas.height = video.videoHeight;
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", 0.85));
+            const person = await getBestPersonPrediction();
+            let sourceCanvas = canvas;
+
+            if (person && person.bbox && person.bbox.length === 4) {
+                const [x, y, w, h] = person.bbox;
+                const padX = w * 0.2;
+                const padY = h * 0.2;
+                const sx = Math.max(0, Math.floor(x - padX));
+                const sy = Math.max(0, Math.floor(y - padY));
+                const ex = Math.min(canvas.width, Math.ceil(x + w + padX));
+                const ey = Math.min(canvas.height, Math.ceil(y + h + padY));
+                const sw = Math.max(1, ex - sx);
+                const sh = Math.max(1, ey - sy);
+
+                const cropCanvas = document.createElement("canvas");
+                cropCanvas.width = sw;
+                cropCanvas.height = sh;
+                const cropCtx = cropCanvas.getContext("2d");
+                cropCtx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+                sourceCanvas = cropCanvas;
+            }
+
+            const blob = await new Promise(resolve => sourceCanvas.toBlob(resolve, "image/jpeg", 0.9));
             const fd = new FormData();
             fd.append("file", blob, "frame.jpg");
+            fd.append("device_type", deviceType);
 
             const resp = await fetch("/detect", { method: "POST", body: fd });
             const data = await resp.json();
@@ -386,6 +487,7 @@ def root() -> str:
                 <div class="badge ${isBad ? "bad" : ""}">${data.result}</div>
                 <div style="margin-top:8px">Score: ${data.score.toFixed(3)}</div>
                 <div>Confidence: ${Math.round(data.confidence * 100)}%</div>
+                <div class="small">Profile: ${data.device_type} | Threshold: ${data.threshold.toFixed(2)}</div>
                 <div class="small" style="margin-top:8px">Logged: ${data.logged_at.date} ${data.logged_at.time}</div>
                 <div class="small">Telegram: ${data.telegram_alert_sent ? "✓ Sent" : "- Not sent"}</div>
             `;
@@ -419,10 +521,10 @@ def root() -> str:
                     if (!personDetectedSince) {
                         personDetectedSince = now;
                         statusBar.className = "status-bar person-found";
-                        statusBar.innerHTML = `<div class="small">Person detected, will auto-capture in 5s...</div>`;
+                        statusBar.innerHTML = `<div class="small">Person detected on ${deviceType}, auto-capture in 5s...</div>`;
                     }
                     const secondsSincePerson = (now - personDetectedSince) / 1000;
-                    statusBar.innerHTML = `<div class="small person-found">Person detected (${secondsSincePerson.toFixed(1)}s). Auto-capturing every 5s...</div>`;
+                        statusBar.innerHTML = `<div class="small person-found">Person detected (${secondsSincePerson.toFixed(1)}s). Auto-capturing every 5s on ${deviceType} profile...</div>`;
 
                     if (!lastCaptureTime || (now - lastCaptureTime) >= 5000) {
                         await detectOnce();
@@ -531,7 +633,10 @@ def reports_summary(limit: int = 365) -> Dict[str, Any]:
 
 
 @app.post("/detect")
-async def detect(file: UploadFile = File(...)) -> Dict[str, Any]:
+async def detect(
+    file: UploadFile = File(...),
+    device_type: str = Form("unknown"),
+) -> Dict[str, Any]:
     if file.content_type is None or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Upload must be an image file")
 
@@ -548,7 +653,7 @@ async def detect(file: UploadFile = File(...)) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     try:
-        prediction = classify_image(image)
+        prediction = classify_image(image, device_type=device_type)
         logged_at = log_detection(
             result=prediction["result"],
             score=prediction["score"],
